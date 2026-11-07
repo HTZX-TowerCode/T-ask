@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运动会 · 教师专场问答</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-theme="sport">
+<div id="app">
+
+  <!-- 顶栏 -->
+  <div class="topbar">
+    <div class="brand" id="brand"></div>
+    <div class="scorebar hide" id="scoreBar">总分 <b id="scoreNum">0</b></div>
+    <div class="timer hide" id="timer">20:00</div>
+    <div class="theme-wrap">
+      <button class="themebtn" id="themeBtn">主题</button>
+      <div class="thememenu" id="themeMenu"></div>
+    </div>
+  </div>
+
+  <!-- 开局页 -->
+  <section id="screen-start">
+    <div class="card">
+      <h1 class="title" id="startTitle"></h1>
+      <p class="sub" id="startSub"></p>
+
+      <div class="namebox">
+        <label class="namelabel" id="nameLabel"></label>
+        <input class="nameinput" id="nameInput" type="text" autocomplete="off" spellcheck="false">
+        <p class="namehint" id="nameHint"></p>
+      </div>
+
+      <!-- 管理员面板（只有管理员能看到） -->
+      <div class="adminbox hide" id="adminBox">
+        <div class="admin-head">
+          <span id="adminBadge"></span>
+          <span class="admin-welcome" id="adminWelcome"></span>
+        </div>
+        <div class="admin-row">
+          <span class="admin-label" id="adminTimeLabel"></span>
+          <input class="admin-input" id="adminTimeInput" type="number" min="1" max="180" step="1">
+          <button class="mini" id="btnUnlimited"></button>
+        </div>
+        <div class="admin-row">
+          <button class="mini wide" id="btnPeek"></button>
+        </div>
+      </div>
+
+      <button class="big" id="btnStart"></button>
+      <div class="disc">
+        <h3 id="discTitle"></h3>
+        <div class="sec" id="discSerious"></div>
+        <div class="sec funny" id="discFunny"></div>
+      </div>
+      <p class="footnote" id="startFoot"></p>
+    </div>
+  </section>
+
+  <!-- 答题页 -->
+  <section id="screen-quiz" class="hide">
+    <div class="card">
+      <div class="qmeta">
+        <span id="tagBox"></span>
+        <span class="progtext" id="progText"></span>
+      </div>
+      <div class="bar"><i id="progBar" style="width:0%"></i></div>
+      <div class="qnav" id="qnav"></div>
+      <div class="reviewtip hide" id="reviewTip"></div>
+      <img id="qImage" class="qimage hide" alt="">
+      <p class="qtext" id="qText"></p>
+      <div class="options" id="options"></div>
+      <div style="margin-top:20px">
+        <button class="big" id="btnSubmit" disabled></button>
+        <button class="ghost" id="btnQuit" type="button"></button>
+      </div>
+      <div class="actionrow" id="actionRow">
+        <button class="mini peekbtn" id="btnPeekQ"></button>
+        <span class="hint" id="peekWarn"></span>
+      </div>
+      <div id="fbBox"></div>
+    </div>
+  </section>
+
+  <!-- 成绩单页 -->
+  <section id="screen-result" class="hide">
+    <div class="card">
+      <div id="forceTip"></div>
+      <h1 class="title" id="resultTitle" style="text-align:center"></h1>
+      <p class="sub" id="resultSub" style="text-align:center"></p>
+      <div class="score-big" id="scoreBig">0</div>
+      <div class="rank" id="rankText"></div>
+      <div class="statrow" id="statRow"></div>
+      <p class="peekstat hide" id="peekStat"></p>
+      <div class="export">
+        <button class="primary" id="btnPng"></button>
+        <button id="btnCopy"></button>
+        <button id="btnCsv"></button>
+        <button id="btnJson"></button>
+      </div>
+      <textarea class="copybox" id="copyBox" readonly></textarea>
+
+      <!-- 管理员：作答回顾 + 再来一套 -->
+      <div class="adminbox hide" id="adminResultBox">
+        <div class="admin-row">
+          <button class="mini wide" id="btnReview"></button>
+        </div>
+        <div class="admin-row">
+          <button class="mini wide" id="btnRedo"></button>
+        </div>
+        <div class="admin-row">
+          <button class="mini wide" id="btnPeek2"></button>
+        </div>
+        <div id="reviewBox"></div>
+        <div id="historyBox"></div>
+      </div>
+
+      <div style="text-align:center;margin-top:22px">
+        <button class="ghost" id="btnReset"></button>
+      </div>
+      <p class="footnote" id="resultFoot"></p>
+    </div>
+  </section>
+
+</div>
+
+<!-- 题库检视弹层 -->
+<div id="peekModal" class="modal hide">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="peekTitle"></h3>
+      <button class="mini" id="btnPeekClose"></button>
+    </div>
+    <p class="modal-tip" id="peekTip"></p>
+    <div class="modal-body" id="peekBody"></div>
+  </div>
+</div>
+
+<!-- 本题答案偷看弹层 -->
+<div id="peekQModal" class="modal hide">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="peekQTitle"></h3>
+      <button class="mini" id="btnPeekQClose"></button>
+    </div>
+    <p class="modal-tip" id="peekQTip"></p>
+    <div class="modal-body" id="peekQBody"></div>
+  </div>
+</div>
+
+<script src="questions.js"></script>
+<script src="app.js"></script>
+<script>
+(function () {
+  'use strict';
+  function _() {
+    var C = window.QUIZ_CONFIG || {};
+    var T = window.QUIZ_TEXTS || {};
+    var btn = document.getElementById('btnQuit');
+    if (!btn) return;
+
+    /* —— 退出按钮 ——
+     * 开关：QUIZ_CONFIG.quitEnabled（默认关闭，需在 questions.js 里设为 true）
+     * 文案：QUIZ_TEXTS.btnQuit / quitConfirmText / quitTip
+     */
+    if (!C.quitEnabled) { btn.style.display = 'none'; return; }
+
+    btn.textContent = T.btnQuit || '退出答题';
+    btn.onclick = function () {
+      var sure = !C.quitConfirm || window.confirm(T.quitConfirmText || '退出后回到开局页，进度保留在本机。');
+      if (!sure) return;
+      var fn = window.QuizCore && window.QuizCore.onBeforeQuit;
+      if (typeof fn === 'function') fn();
+      ['screen-quiz', 'screen-result'].forEach(function (id) {
+        var el = document.getElementById(id); if (el) el.classList.add('hide');
+      });
+      var home = document.getElementById('screen-start');
+      if (home) home.classList.remove('hide');
+      var tip = T.quitTip || '已退出，进度已保留在本机';
+      if (window.toast) window.toast(tip); else window.alert(tip);
+    };
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _);
+  } else {
+    _();
+  }
+})();
+</script>
+</body>
+</html>

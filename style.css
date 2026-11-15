@@ -267,6 +267,30 @@ button.mini.on{background:var(--primary);color:var(--primary-ink);border-color:v
 .fb-real{font-size:13px;color:var(--sub);margin-top:10px;}
 .fb-real span{background:var(--panel);padding:2px 8px;border-radius:6px;margin-right:6px;}
 
+/* ---------------- 回看时揭晓答案 ---------------- */
+.answer-box{
+  margin-top:16px;border:1px dashed var(--primary);border-radius:14px;
+  padding:16px;background:var(--panel);
+}
+.answer-head{
+  display:flex;align-items:baseline;gap:10px;font-size:15px;font-weight:700;
+  color:var(--primary);margin-bottom:8px;
+}
+.answer-head span{margin-left:auto;font-size:12px;font-weight:400;color:var(--sub);}
+.answer-line{font-size:14px;line-height:1.8;color:var(--sub);}
+.answer-best{color:var(--ok);font-weight:700;}
+.answer-opts{margin-top:10px;}
+.answer-mine,.answer-should{
+  display:inline-block;margin-left:6px;font-size:11px;font-weight:700;
+  padding:1px 8px;border-radius:999px;
+}
+.answer-mine{background:var(--soft);color:var(--primary);}
+.answer-should{background:rgba(23,166,115,.15);color:var(--ok);}
+.review-ans{
+  margin-top:8px;padding-top:8px;border-top:1px dashed var(--line);
+  font-size:13px;color:var(--ok);font-weight:700;
+}
+
 /* ---------------- 成绩单 ---------------- */
 .score-big{
   font-size:76px;font-weight:800;line-height:1;text-align:center;margin:10px 0 4px;

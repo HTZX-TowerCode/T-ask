@@ -71,6 +71,72 @@ function calcTheoreticalMax(ids){
   return ids.reduce((s, id) => s + theoreticalMaxOf(byId(id)), 0);
 }
 
+/* 本题的最优选项下标（规则与 theoreticalMaxOf 一致）：
+ * 单选 = 分最高的那一个（没有加分项就是什么都不选）
+ * 多选/不定项 = 所有加分项 */
+function bestPickOf(q){
+  const scores = (q && q.options ? q.options : []).map(o => Number(o.score) || 0);
+  const multi = (q.type === "多选" || q.type === "不定项");
+  const out = [];
+  if (multi){
+    scores.forEach((v, i)=>{ if (v > 0) out.push(i); });
+  } else {
+    let bv = 0, bi = -1;
+    scores.forEach((v, i)=>{ if (v > bv){ bv = v; bi = i; } });
+    if (bi >= 0) out.push(bi);
+  }
+  return out;
+}
+
+/* 回看答案的可见范围：QUIZ_CONFIG.reviewShowAnswer */
+function canReviewAnswer(){
+  const v = CONFIG.reviewShowAnswer;
+  if (v === false || v === "off") return false;
+  if (v === "admin") return !!isAdmin;
+  return true;
+}
+
+/* 把最优选项写成屏幕上的字母，按字母顺序排好 */
+function answerPickText(q, picks){
+  if (!picks.length) return "";
+  const qid = String(q.id);
+  const sum = picks.reduce((s, i)=> s + (Number(q.options[i].score) || 0), 0);
+  return picks.map(i => letterOf(qid, i)).sort().join("、") + "（" + signed(sum) + " 分）";
+}
+
+/* 回看已答题时揭晓的「本题答案」：
+ * 理论最高、最优作答、每个选项的分值与反馈，并标出应选/当时选的。
+ * 字母一律用屏幕顺序（letterOf），和答题时看到的 A/B/C 对得上。 */
+function buildAnswer(q, a){
+  const qid = String(q.id);
+  const max = theoreticalMaxOf(q);
+  const got = (a && Number(a.delta)) || 0;
+  const best = bestPickOf(q);
+  const chosen = (a && a.sel) || [];
+  const bestLine = best.length
+    ? fill(TEXTS.answerBest, {picks: answerPickText(q, best)})
+    : TEXTS.answerBestNone;
+
+  const opts = (q.options || []).map((o, i)=>{
+    const sc = Number(o.score) || 0;
+    const cls = sc > 0 ? "up" : sc < 0 ? "down" : "zero";
+    const marks = (best.includes(i) ? '<span class="answer-should">'+ esc(TEXTS.answerShould) +'</span>' : '')
+                + (chosen.includes(i) ? '<span class="answer-mine">'+ esc(TEXTS.answerMine) +'</span>' : '');
+    return '<div class="peek-opt"><span class="k">'+ letterOf(qid, i) +'.</span>'
+      + '<span><span class="s '+ cls +'">'+ signed(sc) +'</span> '+ esc(o.text) + marks
+      + (o.feedback ? '<br><span class="f">→ '+ esc(o.feedback) +'</span>' : '')
+      + '</span></div>';
+  }).join("");
+
+  return '<div class="answer-box">'
+    + '<div class="answer-head">'+ esc(TEXTS.answerTitle)
+    + '<span>'+ esc(TEXTS.answerFree) +'</span></div>'
+    + '<div class="answer-line">'+ esc(fill(TEXTS.answerMaxLine, {max, got})) +'</div>'
+    + '<div class="answer-line answer-best">'+ esc(bestLine) +'</div>'
+    + '<div class="answer-opts">'+ opts +'</div>'
+    + '</div>';
+}
+
 /* 得分率：实际得分 ÷ 理论最高，保留一位小数。
  * 分母为 0（整卷没有一道能加分的题）时，按是否扣过分给 0 或 100。 */
 function rateOf(score){
@@ -409,7 +475,8 @@ function renderAt(idx, readonly){
         el.appendChild(chip);
       }
     });
-    $("#fbBox").innerHTML = buildFeedback(q, a.sel, a.delta);
+    $("#fbBox").innerHTML = buildFeedback(q, a.sel, a.delta)
+      + (canReviewAnswer() ? buildAnswer(q, a) : "");
   } else {
     $("#fbBox").innerHTML = "";
   }
@@ -421,10 +488,11 @@ function renderAt(idx, readonly){
     : TEXTS.btnSubmit;
   if (!readonly) syncSubmitLabel();
 
-  // 偷看按钮
+  // 偷看按钮：提交后、回看时都不出现（回看答案不扣分，不用再偷看）
   const peekBtn = $("#btnPeekQ");
   peekBtn.classList.toggle("hide", readonly || !!a);
   peekBtn.disabled = false;
+  $("#actionRow").classList.toggle("hide", !!readonly);
 
   updateScoreBar(false);
   window.scrollTo({top:0, behavior:"smooth"});
@@ -448,8 +516,10 @@ function renderNav(idx){
     if (viewing === i) b.classList.add("viewing");
     b.title = done ? TEXTS.navDone : TEXTS.navUndone;
     b.onclick = ()=>{
-      if (i === state.index){ viewing = null; renderAt(i, false); return; }
-      if (!done){ toast(TEXTS.navLocked); return; }
+      // 实时判断：提交后 nav 可能还没重绘，不能用生成时固化的 done
+      const isDone = !!state.answers[String(id)];
+      if (i === state.index && !isDone){ viewing = null; renderAt(i, false); return; }
+      if (!isDone){ toast(TEXTS.navLocked); return; }
       viewing = i; renderAt(i, true);
     };
     nav.appendChild(b);
@@ -493,6 +563,7 @@ function doSubmit(){
 
   $("#fbBox").innerHTML = buildFeedback(q, sel, delta);
   $("#btnPeekQ").classList.add("hide");
+  renderNav(state.index);                 // 本题变绿，立刻可以点开回看答案
   $("#btnSubmit").textContent = (state.index >= state.order.length-1) ? TEXTS.btnResult : TEXTS.btnNext;
 }
 
@@ -595,12 +666,17 @@ $("#btnReview").onclick = ()=>{
   box.innerHTML = state.order.map((id,n)=>{
     const q = byId(id), a = state.answers[id];
     if (!q) return "";
+    const best = bestPickOf(q), max = theoreticalMaxOf(q);
+    const picks = best.length ? answerPickText(q, best) : "什么都不选（0 分）";
+    const ansLine = canReviewAnswer()
+      ? '<div class="review-ans">'+ esc(fill(TEXTS.answerReviewLine, {max, picks})) +'</div>' : "";
     if (!a) return '<div class="review-item"><div class="rq">'+(n+1)+'. '+esc(q.text)+'</div>'
-      + '<div class="ra">未作答<span class="rd">0 分</span></div></div>';
-    const picks = a.sel.map(i=>'<div>'+ letterOf(id, i) +'. '+ esc(q.options[i].text)
+      + '<div class="ra">未作答<span class="rd">0 分</span></div>'+ ansLine +'</div>';
+    const picksHtml = a.sel.map(i=>'<div>'+ letterOf(id, i) +'. '+ esc(q.options[i].text)
       + '（'+ signed(Number(q.options[i].score)||0) +'）</div>').join("");
     return '<div class="review-item"><div class="rq">'+(n+1)+'. '+esc(q.text)+'</div>'
-      + '<div class="ra">'+ picks +'<span class="rd">'+ signed(a.delta) +' 分</span></div></div>';
+      + '<div class="ra">'+ picksHtml +'<span class="rd">'+ signed(a.delta) +' 分</span></div>'
+      + ansLine +'</div>';
   }).join("");
 };
 $("#btnRedo").onclick = ()=>{

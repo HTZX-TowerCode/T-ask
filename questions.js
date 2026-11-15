@@ -21,6 +21,13 @@ window.QUIZ_CONFIG = {
   shuffleOptions: true,       // 每个选项顺序随机打乱（不让 A 总是最高分）
                               // 想按题库原本顺序显示就改成 false
 
+  /* —— 回看时揭晓答案 ——
+   * "all"   = 所有人回看已答题都能看（默认）
+   * "admin" = 只有管理员能看
+   * false   = 关掉，回看只显示当时的作答
+   * 只影响「已提交」的题回看，未答的题点不开，不扣分、不加分。 */
+  reviewShowAnswer: "all",
+
   /* —— 退出按钮 —— */
   quitEnabled:     true,     // 是否在答题页显示"退出答题"按钮
   quitConfirm:     true,     // 退出前是否弹出确认框
@@ -107,12 +114,22 @@ window.QUIZ_TEXTS = {
   peekStat:      "👀 本场瞄了 {c} 次，被扣 {t} 分",
 
   /* —— 回看 —— */
-  navHint:    "点绿色题号可以回看（只看，改不了答案）",
-  navDone:    "已作答，点开回看",
+  navHint:    "点绿色题号回看：能看本题答案，改不了选择",
+  navDone:    "已作答，点开回看答案",
   navUndone:  "还没答",
   navLocked:  "这题还没答，回看不了。",
-  reviewTip:  "👀 正在回看第 {n} 题 · 答案改不了了",
+  reviewTip:  "👀 正在回看第 {n} 题 · 答案在下面，选择改不了了",
   backToCurrent: "回到第 {n} 题",
+
+  /* —— 回看时揭晓的本题答案 —— */
+  answerTitle:   "📖 本题答案",
+  answerFree:    "回看不扣分",
+  answerMaxLine: "本题理论最高 {max} 分 · 本题得分 {got} 分",
+  answerBest:    "最优作答：{picks}",
+  answerBestNone:"最优作答：什么都不选（0 分）",
+  answerMine:    "你选的",
+  answerShould:  "应选",
+  answerReviewLine: "理论最高 {max} 分 · 最优 {picks}",
 
   /* —— 不选 —— */
   noneChosen: "你一个都没选。有时候不选也是一种答案。",

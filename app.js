@@ -36,120 +36,60 @@ function toast(msg, ms=2600){
   document.body.appendChild(t); setTimeout(()=>t.remove(), ms);
 }
 /* ============================================================
- *  150 分制：全程使用归一化后的分数存储与运算
+ *  计分：原始分值 + 理论最高得分 + 得分率
  *  ------------------------------------------------------------
- *  核心原则：state.score 里存的永远是 150 分制下的分数，
- *  而不是"题库原始分值之和"。任何时刻读到 state.score，
- *  它都天然落在 [0, FULL] 区间。
+ *  每题得分 = 所选选项的分值相加，一个都不选记 0 分。
+ *  每题「理论最高得分」= 这道题能拿到的最好结果：
+ *    单选        → 分最高的那个选项（低于 0 记 0）
+ *    多选/不定项 → 所有加分项之和（低于 0 记 0）
+ *  选项全是扣分的题，什么都不选就是最高分，理论最高记 0，
+ *  不往分母里凑数。
  *
- *  做法：抽题时一次性把 150 分"分配"到每道题、每个选项，
- *  用"最大余数法"（Hamilton / Hare–Niemeyer 分配法）保证
- *  所有数值之和严格等于 FULL（150）。答题时只是按选中的
- *  选项查表取值、累加，不再做任何四舍五入，因此中途分数
- *  与最终总分都能精确落在 150 分制内，且全对恒为 150。
- *  ------------------------------------------------------------
- *  题目原始分值只用于：① 抽题时决定分值分配比例；② 页面
- *  上显示"+5 分"这类反馈文字。原始分不进入 state.score。
+ *  本卷理论最高 = 抽到的各题理论最高之和，抽题时算好就固定。
+ *  得分率 = 实际得分 ÷ 本卷理论最高 × 100%（保留一位小数），
+ *  段位称号按得分率评定，不同套卷之间可以直接比。
  * ============================================================ */
-const FULL = 150;
 
-/* 最大余数法：把 total 个整数单位，按 weights 的比例分配成整数数组，
- * 返回数组之和严格等于 total。 */
-function hareNiemeyer(weights, total){
-  const n = weights.length;
-  if (total <= 0 || n === 0) return weights.map(()=> 0);
-  const exact = weights.map(w=> (w < 0 ? 0 : w) * total);
-  const sumW = exact.reduce((a,b)=> a + b, 0);
-  const scaled = sumW > 0 ? exact.map(e=> e / sumW * total) : weights.map(()=> total / n);
-  const out = scaled.map(v=> Math.floor(v));
-  let rest = total - out.reduce((a,b)=> a + b, 0);
-  const fracs = scaled.map((v,i)=> ({ i, f: v - Math.floor(v) }));
-  fracs.sort((a,b)=> b.f - a.f || b.v - a.v);
-  if (rest > 0){ for (let k = 0; k < rest; k++) out[fracs[k].i]++; }
-  else if (rest < 0){
-    for (let k = 0; k < -rest; k++){
-      const idx = fracs[fracs.length - 1 - k].i;
-      out[idx] = Math.max(0, out[idx] - 1);
-    }
-  }
-  return out;
-}
-
-/* 计算一道题的原始满分（用于确定分值分配比例） */
-function rawMaxOf(q){
+/* 一道题的理论最高得分 */
+function theoreticalMaxOf(q){
   if (!q || !q.options || !q.options.length) return 0;
+  const scores = q.options.map(o => Number(o.score) || 0);
   const multi = (q.type === "多选" || q.type === "不定项");
-  if (multi) return q.options.reduce((s,o)=> s + (Number(o.score) || 0), 0);
-  let best = 0;
-  q.options.forEach(o=>{ const sc = Number(o.score) || 0; if (sc > best) best = sc; });
-  return best;
+  let best;
+  if (multi){
+    // 可以只挑加分项，也可以一个都不选
+    best = scores.reduce((s, v) => s + (v > 0 ? v : 0), 0);
+  } else {
+    // 单选只能选一个，或者一个都不选
+    best = Math.max.apply(null, scores.concat([0]));
+  }
+  return Math.max(0, best);
 }
 
-/* 本套卷的原始满分 */
-function calcMaxScore(ids){
-  let m = 0;
-  ids.forEach(id=>{ m += rawMaxOf(byId(id)); });
-  return m;
+/* 本套卷的理论最高得分 */
+function calcTheoreticalMax(ids){
+  return ids.reduce((s, id) => s + theoreticalMaxOf(byId(id)), 0);
 }
 
-/* 抽题时构建 150 分制分值表：
- *   slot[id]     —— 该题分到的 150 分制分值（整数）
- *   optScore[id] —— 该题各选项的 150 分制分值（整数数组，下标=原始选项下标）
- * 两处之和都严格等于 FULL。 */
-function buildNorm(ids){
-  const rawMax = {};
-  ids.forEach(id=>{
-    const rm = rawMaxOf(byId(id));
-    rawMax[id] = rm;
-  });
-  // 第一步：150 分按每题原始满分的比例分到各题
-  const slots = hareNiemeyer(ids.map(id=> rawMax[id]), FULL);
-  const slot = {};
-  const optScore = {};
-  ids.forEach((id,i)=>{
-    slot[id] = slots[i];
-    const q = byId(id);
-    const weights = (q.options || []).map(o=> Number(o.score) || 0);
-    let os = hareNiemeyer(weights, slots[i]);
-    // 修正：选项含负分时 H-N 可能让选项之和与 slot 有偏差，补到绝对值最大的选项上
-    const sumOs = os.reduce((a,b)=> a + b, 0);
-    if (sumOs !== slots[i]){
-      let idx = 0, mx = -1;
-      os.forEach((v,j)=>{ if (Math.abs(v) > mx){ mx = Math.abs(v); idx = j; } });
-      os[idx] += (slots[i] - sumOs);
-    }
-    optScore[id] = os;
-  });
-  return { rawMax, slot, optScore };
+/* 得分率：实际得分 ÷ 理论最高，保留一位小数。
+ * 分母为 0（整卷没有一道能加分的题）时，按是否扣过分给 0 或 100。 */
+function rateOf(score){
+  const max = (state && Number(state.theoreticalMax)) || 0;
+  if (max <= 0) return score >= 0 ? 100 : 0;
+  return Math.round(score / max * 1000) / 10;
 }
 
-/* 段位称号：直接按 150 分制绝对分评定 */
-function rankOf(score){
-  const disp = Math.max(0, Math.min(FULL, Math.round(score)));
-  for (const [line,name] of RANKS) if (disp >= line) return name;
-  return RANKS[RANKS.length-1][1];
+/* 段位称号：按得分率评定，从上往下匹配 */
+function rankOf(rate){
+  for (const [line, name] of RANKS) if (rate >= line) return name;
+  return RANKS[RANKS.length - 1][1];
 }
 
-/* 显示用的「得分 / 150 分」字符串（满分恒为 FULL） */
-const slash = score => signed(score) + " / " + FULL;
+/* 显示用的「实际得分 / 理论最高」 */
+const slash = score => signed(score) + " / " + ((state && state.theoreticalMax) || 0);
 
-/* 得分率百分比（0~100），用于进度条/百分比小标签 */
-function scorePercent(score){
-  if (score <= 0) return 0;
-  return Math.max(0, Math.min(100, Math.round(score / FULL * 100)));
-}
-
-/* 偷看扣分的 150 分制折算：按该卷分值池比例，把"第 n 次"折算成扣多少分。
- * 保证扣分发生在 150 分制内，且第 1 次至少扣 1 分。 */
-function peekCost(qid, n){
-  const optScore = (state && state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
-  // 该题分值池规模（绝对值之和），用于确定"扣 1 分原始"对应 150 分制里几分
-  let pool = 0;
-  optScore.forEach(v=>{ pool += Math.abs(Number(v) || 0); });
-  if (pool <= 0) return 1;
-  const normed = Math.round(n * (FULL / Math.max(state.maxScore, 1)));
-  return Math.max(1, normed);
-}
+/* 偷看扣分：第 n 次扣 n 分，整场累计，按原始分值口径 */
+function peekCost(qid, n){ return n; }
 
 const kebab = s => s.replace(/[A-Z]/g, m => "-"+m.toLowerCase());
 
@@ -188,11 +128,10 @@ function newState(name){
   }
   const ids = shuffle(BANK.map(q => String(q.id))).slice(0, need);
   const now = Date.now();
-  const maxScore = calcMaxScore(ids);   // 本套卷满分（原始分值口径），抽定即固定
-  const norm = buildNorm(ids);           // 150 分制分值表（slot + optScore）
-  return { v:1, name:name||"", admin:isAdmin,
+  const theoreticalMax = calcTheoreticalMax(ids);  // 本卷理论最高，抽定即固定
+  return { v:2, name:name||"", admin:isAdmin,
            order:ids, optOrder:buildOptOrder(ids), answers:{}, index:0, score:0,
-           maxScore:maxScore, norm:norm,
+           theoreticalMax:theoreticalMax,
            peeked:[], peekCount:0, peekPenalty:0,
            startedAt:now,
            deadline: unlimited ? now + 1000*60*60*24*365 : now + durationMin*60000,
@@ -204,21 +143,20 @@ function load(){
   try{
     const s = JSON.parse(localStorage.getItem(LS_PROGRESS));
     if (!s || !s.order) return null;
-    /* 旧存档迁移：此前版本 state.score 存的是原始分值（非 150 分制），
-     * 且没有 alloc/rawMax。这里按当时存档里的 maxScore 反推一个近似
-     * 比例，让旧进度能继续答题而不崩；精度不如新抽卷，但足够过渡。 */
-    if (!s.alloc && s.maxScore && s.maxScore > 0 && FULL !== s.maxScore){
-      const ratio = FULL / s.maxScore;
-      s.score = Math.round((Number(s.score) || 0) * ratio);
-      Object.keys(s.answers || {}).forEach(k=>{
-        const a = s.answers[k];
-        if (a && a.delta !== undefined){
-          a.rawDelta = Number(a.rawDelta) || a.delta;
-          a.delta = Math.round((Number(a.rawDelta) || a.delta) * ratio);
-        }
-      });
-      if (s.peekPenalty) s.peekPenalty = Math.round((Number(s.peekPenalty) || 0) * ratio);
-    }
+    // 题库改过分值时，按当前题库重算理论最高，分母跟着题目走
+    s.theoreticalMax = calcTheoreticalMax(s.order);
+    if (s.v === 2) return s;
+    /* 旧版（150 分制）存档：按理论最高把分数换算回原始分值。
+     * 取整会有误差，但进行中的进度不会丢。 */
+    const ratio = s.theoreticalMax / 150;
+    s.score = Math.round((Number(s.score) || 0) * ratio);
+    s.peekPenalty = Math.round((Number(s.peekPenalty) || 0) * ratio);
+    Object.keys(s.answers || {}).forEach(k=>{
+      const a = s.answers[k];
+      if (a && a.delta !== undefined) a.delta = Math.round((Number(a.delta) || 0) * ratio);
+    });
+    s.v = 2;
+    delete s.norm; delete s.alloc; delete s.maxScore; delete s.rawMax;
     return s;
   }catch(e){ return null; }
 }
@@ -260,7 +198,7 @@ function show(name){
 let lastScore = null;
 function updateScoreBar(animate){
   if (!state) return;
-  $("#scoreNum").textContent = slash(state.score);   // 150 分制：得分 / 150
+  $("#scoreNum").textContent = slash(state.score);   // 实际得分 / 理论最高
   $("#scoreBar").classList.toggle("minus", state.score < 0);
   if (animate && lastScore !== null && state.score !== lastScore){
     $("#scoreBar").classList.add("bump");
@@ -419,9 +357,9 @@ function renderAt(idx, readonly){
     : (q.contentTag ? '<span class="tag">'+esc(q.contentTag)+'</span>' : '')
     + (q.type ? '<span class="tag">'+esc(q.type)+'</span>' : '');
 
-  const pct = scorePercent(state.score);
+  const rate = rateOf(state.score);
   $("#progText").textContent = fill(TEXTS.progressText,
-      {n:idx+1, total:state.order.length, score:slash(state.score), pct:pct});
+      {n:idx+1, total:state.order.length, score:slash(state.score), rate:rate});
   $("#progBar").style.width  = (idx / state.order.length * 100) + "%";
 
   // 题号导航
@@ -459,9 +397,8 @@ function renderAt(idx, readonly){
   // 回看：还原当时的作答状态
   if (readonly && a){
     const chosen = a.sel || [];
-    const optScore = (state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
     box.querySelectorAll(".opt").forEach(el=>{
-      const i = Number(el.dataset.i), sc = Number(optScore[i]) || 0;
+      const i = Number(el.dataset.i), sc = Number(q.options[i].score) || 0;
       el.classList.add("locked");
       if (chosen.includes(i)){
         el.classList.toggle("sel", true);
@@ -534,18 +471,16 @@ function doSubmit(){
   const sel = [...document.querySelectorAll("#options .opt.sel")].map(el => Number(el.dataset.i));
   locked = true;   // 不选也可以提交，sel 可能为空
 
-  // 该题得分 = 所选各选项的 150 分制分值之和（抽题时已分配好，直接查表累加）
-  const optScore = (state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
+  // 该题得分 = 所选选项的原始分值之和（一个都不选就是 0 分）
   let delta = 0;
-  sel.forEach(i=>{ delta += (Number(optScore[i]) || 0); });
+  sel.forEach(i=>{ delta += (Number(q.options[i].score) || 0); });
   state.answers[qid] = { sel, delta, qtext:q.text, ts:Date.now() };
   state.score += delta;
-  if (state.score > FULL) state.score = FULL;     // 累加兜底（理论上不触发）
   save();
   updateScoreBar(true);
 
   document.querySelectorAll("#options .opt").forEach(el=>{
-    const i = Number(el.dataset.i), chosen = sel.includes(i), sc = Number(optScore[i]) || 0;
+    const i = Number(el.dataset.i), chosen = sel.includes(i), sc = Number(q.options[i].score) || 0;
     el.classList.add("locked");
     if (chosen){
       el.classList.add(sc > 0 ? "right" : "wrong");
@@ -563,11 +498,10 @@ function doSubmit(){
 
 function buildFeedback(q, sel, delta){
   const qid = String(q.id);
-  const optScore = (state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
   const lines = sel.length
     ? sel.map(i=>{
-        const op = q.options[i], raw = Number(op.score)||0, sc = Number(optScore[i]) || 0;
-        const color = raw>0 ? "var(--ok)" : raw<0 ? "var(--bad)" : "var(--sub)";
+        const op = q.options[i], sc = Number(op.score) || 0;
+        const color = sc>0 ? "var(--ok)" : sc<0 ? "var(--bad)" : "var(--sub)";
         return '<p class="fb-line"><b>'+ letterOf(qid, i) +'. '+ esc(op.text) +'</b>　'
           + '<span style="color:'+color+';font-weight:700">'+ signed(sc) +' 分</span><br>' + esc(op.feedback||"") + '</p>';
       }).join("")
@@ -577,11 +511,11 @@ function buildFeedback(q, sel, delta){
   const reveal = (q.secretTag && String(q.secretTag).trim())
     ? '<div class="fb-real">'+ esc(TEXTS.secretReveal) +'<span>'+ esc(realTag) +'</span>'+ esc(TEXTS.secretSuffix) +'</div>' : "";
 
-  const pct = scorePercent(state.score);
+  const rate = rateOf(state.score);
   return '<div class="feedback">'
     + '<div class="fb-head"><span class="fb-delta '+(delta>0?"up":delta<0?"down":"")+'">'+ signed(delta) +' 分</span>'
     + '<span class="fb-total">累计 '+ slash(state.score)
-    + '　<span style="color:var(--primary);font-weight:700">'+ pct +'%</span></span></div>'
+    + '　<span style="color:var(--primary);font-weight:700">'+ rate +'%</span></span></div>'
     + lines
     + (q.comment ? '<div class="fb-comment">'+ esc(TEXTS.commentMark) + esc(q.comment) +'</div>' : "")
     + reveal + '</div>';
@@ -600,8 +534,8 @@ function finish(forced){
   pushHistory({
     name: state.name, score: state.score,
     n: Object.keys(state.answers).length, total: state.order.length,
-    max: FULL,
-    pct: scorePercent(state.score),
+    max: state.theoreticalMax,
+    rate: rateOf(state.score),
     time: state.finishedAt - state.startedAt, ts: state.finishedAt
   });
   renderResult(); show("result");
@@ -609,23 +543,24 @@ function finish(forced){
 function renderResult(){
   const answered = Object.keys(state.answers).length;
   const used = state.finishedAt - state.startedAt;
-  const pct = scorePercent(state.score);
+  const rate = rateOf(state.score);
 
   $("#forceTip").innerHTML = state.forced ? '<div class="warnbox">'+ esc(TEXTS.forceTip) +'</div>' : "";
   $("#resultTitle").textContent = TEXTS.resultTitle;
   $("#resultSub").textContent   = fill(TEXTS.resultWho, {name: state.name || "匿名"});
 
   const sb = $("#scoreBig");
-  sb.textContent = slash(state.score);          // 150 分制：得分 / 150
+  sb.textContent = slash(state.score);          // 实际得分 / 理论最高
   sb.className = "score-big " + (state.score>0?"up":state.score<0?"down":"");
-  $("#rankText").textContent = rankOf(state.score) + "（满分 " + FULL + " 分）";
+  $("#rankText").textContent = rankOf(rate) + fill(TEXTS.rankSuffix, {max:state.theoreticalMax, rate:rate});
   $("#statRow").innerHTML =
       '<div>'+esc(TEXTS.labelCount)+'<b>'+answered+' / '+state.order.length+'</b></div>'
     + '<div>'+esc(TEXTS.labelTime)+'<b>'+fmt(used)+'</b></div>'
-    + '<div>'+esc(TEXTS.labelPercent)+'<b>'+pct+' / '+FULL+'</b></div>'
+    + '<div>'+esc(TEXTS.labelPercent)+'<b>'+rate+'%</b></div>'
+    + '<div>'+esc(TEXTS.labelMax)+'<b>'+state.theoreticalMax+' 分</b></div>'
     + '<div>'+esc(TEXTS.labelFinish)+'<b>'+stamp(state.finishedAt)+'</b></div>';
 
-  $("#copyBox").value = buildText(used, answered, pct);
+  $("#copyBox").value = buildText(used, answered, rate);
 
   // 偷看扣分记录（只在瞄过时才显示）
   const peekBox = $("#peekStat");
@@ -645,7 +580,8 @@ function renderHistory(){
   const h = getHistory();
   if (!h.length) return '<div class="hist-head">'+esc(TEXTS.adminRecords)+'</div><div class="hist-item">'+esc(TEXTS.adminNoRecord)+'</div>';
   return '<div class="hist-head">'+esc(TEXTS.adminRecords)+'</div>' + h.map(r=>{
-    const mx = r.max || 0, pc = r.pct != null ? r.pct : (mx>0 ? Math.round(r.score/mx*100) : 0);
+    const mx = Number(r.max) || 0;
+    const pc = r.rate != null ? r.rate : (mx > 0 ? Math.round(r.score / mx * 1000) / 10 : 0);
     const slashStr = mx>0 ? signed(r.score)+' / '+mx : signed(r.score);
     return '<div class="hist-item"><span class="hs">'+ slashStr +'</span>'
       + '<span>'+ esc(r.name||"匿名") +' · '+ r.n +'/'+ r.total +' 题 · '+ pc +'%'
@@ -671,13 +607,16 @@ $("#btnRedo").onclick = ()=>{
   try{ state = newState(state.name); }catch(e){ return; }
   save(); startTimer(); renderQuestion(); show("quiz");
 };
-function buildText(used, answered, pct){
+function buildText(used, answered, rate){
+  const max = state.theoreticalMax;
   return [
     fill(TEXTS.textLine1,  {title:CONFIG.title}),
     fill(TEXTS.textSchool, {school:CONFIG.schoolName}),
     fill(TEXTS.textName,   {name: state.name || "匿名"}),
-    fill(TEXTS.textScore,  {score: pct + " / " + FULL + " 分"}),
-    fill(TEXTS.textRank,   {rank: rankOf(state.score)}),
+    fill(TEXTS.textScore,  {score: signed(state.score), max:max}),
+    fill(TEXTS.textMax,    {max:max}),
+    fill(TEXTS.textRate,   {rate:rate}),
+    fill(TEXTS.textRank,   {rank: rankOf(rate)}),
     fill(TEXTS.textCount,  {n:answered, total:state.order.length}),
     fill(TEXTS.textTime,   {time:fmt(used)}),
     fill(TEXTS.textStamp,  {stamp:stamp(state.finishedAt)}),
@@ -706,25 +645,38 @@ $("#btnCopy").onclick = ()=>{
 };
 $("#btnCsv").onclick = ()=>{
   const who = state.name || "匿名";
-  const rows = [["姓名","题号","题目","内容标签","题型","你的选择","选项分值","本题得分","反馈"]];
+  const rate = rateOf(state.score);
+  const rows = [["姓名","题号","题目","内容标签","题型","你的选择","选项分值","本题得分","本题理论最高","反馈"]];
   state.order.forEach((id,n)=>{
     const q = byId(id), a = state.answers[id];
     if (!q) return;
-    if (!a){ rows.push([who, n+1, q.text, q.contentTag||"", q.type||"", "未作答", "", 0, ""]); return; }
+    const qmax = theoreticalMaxOf(q);
+    if (!a){ rows.push([who, n+1, q.text, q.contentTag||"", q.type||"", "未作答", "", 0, qmax, ""]); return; }
     rows.push([
       who, n+1, q.text, q.contentTag||"", q.type||"",
       a.sel.map(i=>letterOf(id, i)+"."+q.options[i].text).join(" / "),
-      a.sel.map(i=>(Number(state.norm.optScore[id][i])||0)).join(" / "),
-      a.delta,
+      a.sel.map(i=>(Number(q.options[i].score)||0)).join(" / "),
+      a.delta, qmax,
       a.sel.map(i=>q.options[i].feedback||"").join(" / ")
     ]);
   });
+  rows.push([who, "合计", "", "", "", "实际得分 "+state.score+" 分", "", state.score,
+             "理论最高 "+state.theoreticalMax+" 分 · 得分率 "+rate+"%", rankOf(rate)]);
   const csv = "\ufeff" + rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(",")).join("\r\n");
   download(new Blob([csv],{type:"text/csv;charset=utf-8"}), fileName("csv"));
   toast(TEXTS.toastCsv);
 };
 $("#btnJson").onclick = ()=>{
-  download(new Blob([JSON.stringify({config:CONFIG, progress:state, history:getHistory()}, null, 2)], {type:"application/json"}), fileName("json"));
+  const rate = rateOf(state.score);
+  download(new Blob([JSON.stringify({
+    config: CONFIG,
+    summary: {
+      name: state.name || "匿名", score: state.score,
+      theoreticalMax: state.theoreticalMax, rate: rate, rank: rankOf(rate),
+      answered: Object.keys(state.answers).length
+    },
+    progress: state, history: getHistory()
+  }, null, 2)], {type:"application/json"}), fileName("json"));
   toast(TEXTS.toastJson);
 };
 $("#btnPng").onclick = ()=>{
@@ -762,19 +714,19 @@ function makeCard(){
   const nm = state.name || "匿名";
   c.fillStyle=v.sub;  c.font="500 26px "+F; c.fillText(nm + " 老师", C, 355);
 
-  const sc=state.score, pc=scorePercent(sc);
+  const sc=state.score, rate=rateOf(sc), max=state.theoreticalMax;
   c.fillStyle = sc>0 ? v.primary : (sc<0 ? v.bad : v.ink);
   c.font="800 140px "+F; c.fillText(slash(sc), C, 505);
-  c.fillStyle=v.sub; c.font="500 24px "+F; c.fillText(TEXTS.labelScore + "　（满分 " + FULL + " 分）", C, 550);
+  c.fillStyle=v.sub; c.font="500 24px "+F; c.fillText(fill(TEXTS.pngScoreLine, {max, rate}), C, 550);
 
-  c.fillStyle=v.primary; c.font="700 34px "+F; c.fillText(rankOf(sc), C, 630);
+  c.fillStyle=v.primary; c.font="700 34px "+F; c.fillText(rankOf(rate), C, 630);
 
   const used=state.finishedAt-state.startedAt, ans=Object.keys(state.answers).length;
   c.fillStyle=v.ink; c.font="700 28px "+F;
 
   c.fillText(ans+" / "+state.order.length+" 题", C-200, 720);
   c.fillText(fmt(used),                    C+0,   720);
-  c.fillText(pc+" / "+FULL,                C+200, 720);
+  c.fillText(rate+"%",                     C+200, 720);
   c.fillStyle=v.sub; c.font="500 18px "+F;
   c.fillText(TEXTS.labelCount,   C-200, 758);
   c.fillText(TEXTS.labelTime,    C+0,   758);
@@ -815,7 +767,7 @@ $("#btnPeekQ").onclick = ()=>{
   state.peekCount++;
   const cost = peekCost(q.id, state.peekCount);
   state.peekPenalty += cost;
-  state.score = Math.max(0, state.score - cost);
+  state.score -= cost;
   save(); updateScoreBar(true);
   toast(fill(TEXTS.peekDeny, {n:cost}));
 };
@@ -833,18 +785,6 @@ function boot(){
   if (saved && !saved.finished){
     state = saved;
     isAdmin = state.admin === true;
-    if (!state.norm && state.maxScore && state.maxScore > 0 && FULL !== state.maxScore){
-      const ratio = FULL / state.maxScore;
-      state.score = Math.round((Number(state.score)||0) * ratio);
-      state.peekPenalty = Math.round((Number(state.peekPenalty)||0) * ratio);
-      Object.keys(state.answers||{}).forEach(k=>{
-        const a = state.answers[k];
-        if (a && a.delta !== undefined){ a.rawDelta = a.delta; a.delta = Math.round((Number(a.rawDelta)||0) * ratio); }
-      });
-      state.maxScore = FULL;
-    } else if (!state.norm){
-      state.norm = buildNorm(state.order);
-    }
     durationMin = state.duration || CONFIG.durationMinutes;
     unlimited  = !!state.unlimited;
     lastScore = state.score;

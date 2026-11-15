@@ -35,10 +35,122 @@ function toast(msg, ms=2600){
   const t = document.createElement("div"); t.className="toast"; t.textContent=msg;
   document.body.appendChild(t); setTimeout(()=>t.remove(), ms);
 }
+/* ============================================================
+ *  150 分制：全程使用归一化后的分数存储与运算
+ *  ------------------------------------------------------------
+ *  核心原则：state.score 里存的永远是 150 分制下的分数，
+ *  而不是"题库原始分值之和"。任何时刻读到 state.score，
+ *  它都天然落在 [0, FULL] 区间。
+ *
+ *  做法：抽题时一次性把 150 分"分配"到每道题、每个选项，
+ *  用"最大余数法"（Hamilton / Hare–Niemeyer 分配法）保证
+ *  所有数值之和严格等于 FULL（150）。答题时只是按选中的
+ *  选项查表取值、累加，不再做任何四舍五入，因此中途分数
+ *  与最终总分都能精确落在 150 分制内，且全对恒为 150。
+ *  ------------------------------------------------------------
+ *  题目原始分值只用于：① 抽题时决定分值分配比例；② 页面
+ *  上显示"+5 分"这类反馈文字。原始分不进入 state.score。
+ * ============================================================ */
+const FULL = 150;
+
+/* 最大余数法：把 total 个整数单位，按 weights 的比例分配成整数数组，
+ * 返回数组之和严格等于 total。 */
+function hareNiemeyer(weights, total){
+  const n = weights.length;
+  if (total <= 0 || n === 0) return weights.map(()=> 0);
+  const exact = weights.map(w=> (w < 0 ? 0 : w) * total);
+  const sumW = exact.reduce((a,b)=> a + b, 0);
+  const scaled = sumW > 0 ? exact.map(e=> e / sumW * total) : weights.map(()=> total / n);
+  const out = scaled.map(v=> Math.floor(v));
+  let rest = total - out.reduce((a,b)=> a + b, 0);
+  const fracs = scaled.map((v,i)=> ({ i, f: v - Math.floor(v) }));
+  fracs.sort((a,b)=> b.f - a.f || b.v - a.v);
+  if (rest > 0){ for (let k = 0; k < rest; k++) out[fracs[k].i]++; }
+  else if (rest < 0){
+    for (let k = 0; k < -rest; k++){
+      const idx = fracs[fracs.length - 1 - k].i;
+      out[idx] = Math.max(0, out[idx] - 1);
+    }
+  }
+  return out;
+}
+
+/* 计算一道题的原始满分（用于确定分值分配比例） */
+function rawMaxOf(q){
+  if (!q || !q.options || !q.options.length) return 0;
+  const multi = (q.type === "多选" || q.type === "不定项");
+  if (multi) return q.options.reduce((s,o)=> s + (Number(o.score) || 0), 0);
+  let best = 0;
+  q.options.forEach(o=>{ const sc = Number(o.score) || 0; if (sc > best) best = sc; });
+  return best;
+}
+
+/* 本套卷的原始满分 */
+function calcMaxScore(ids){
+  let m = 0;
+  ids.forEach(id=>{ m += rawMaxOf(byId(id)); });
+  return m;
+}
+
+/* 抽题时构建 150 分制分值表：
+ *   slot[id]     —— 该题分到的 150 分制分值（整数）
+ *   optScore[id] —— 该题各选项的 150 分制分值（整数数组，下标=原始选项下标）
+ * 两处之和都严格等于 FULL。 */
+function buildNorm(ids){
+  const rawMax = {};
+  ids.forEach(id=>{
+    const rm = rawMaxOf(byId(id));
+    rawMax[id] = rm;
+  });
+  // 第一步：150 分按每题原始满分的比例分到各题
+  const slots = hareNiemeyer(ids.map(id=> rawMax[id]), FULL);
+  const slot = {};
+  const optScore = {};
+  ids.forEach((id,i)=>{
+    slot[id] = slots[i];
+    const q = byId(id);
+    const weights = (q.options || []).map(o=> Number(o.score) || 0);
+    let os = hareNiemeyer(weights, slots[i]);
+    // 修正：选项含负分时 H-N 可能让选项之和与 slot 有偏差，补到绝对值最大的选项上
+    const sumOs = os.reduce((a,b)=> a + b, 0);
+    if (sumOs !== slots[i]){
+      let idx = 0, mx = -1;
+      os.forEach((v,j)=>{ if (Math.abs(v) > mx){ mx = Math.abs(v); idx = j; } });
+      os[idx] += (slots[i] - sumOs);
+    }
+    optScore[id] = os;
+  });
+  return { rawMax, slot, optScore };
+}
+
+/* 段位称号：直接按 150 分制绝对分评定 */
 function rankOf(score){
-  for (const [line,name] of RANKS) if (score >= line) return name;
+  const disp = Math.max(0, Math.min(FULL, Math.round(score)));
+  for (const [line,name] of RANKS) if (disp >= line) return name;
   return RANKS[RANKS.length-1][1];
 }
+
+/* 显示用的「得分 / 150 分」字符串（满分恒为 FULL） */
+const slash = score => signed(score) + " / " + FULL;
+
+/* 得分率百分比（0~100），用于进度条/百分比小标签 */
+function scorePercent(score){
+  if (score <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round(score / FULL * 100)));
+}
+
+/* 偷看扣分的 150 分制折算：按该卷分值池比例，把"第 n 次"折算成扣多少分。
+ * 保证扣分发生在 150 分制内，且第 1 次至少扣 1 分。 */
+function peekCost(qid, n){
+  const optScore = (state && state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
+  // 该题分值池规模（绝对值之和），用于确定"扣 1 分原始"对应 150 分制里几分
+  let pool = 0;
+  optScore.forEach(v=>{ pool += Math.abs(Number(v) || 0); });
+  if (pool <= 0) return 1;
+  const normed = Math.round(n * (FULL / Math.max(state.maxScore, 1)));
+  return Math.max(1, normed);
+}
+
 const kebab = s => s.replace(/[A-Z]/g, m => "-"+m.toLowerCase());
 
 /* ==================== 主题 ==================== */
@@ -76,8 +188,11 @@ function newState(name){
   }
   const ids = shuffle(BANK.map(q => String(q.id))).slice(0, need);
   const now = Date.now();
+  const maxScore = calcMaxScore(ids);   // 本套卷满分（原始分值口径），抽定即固定
+  const norm = buildNorm(ids);           // 150 分制分值表（slot + optScore）
   return { v:1, name:name||"", admin:isAdmin,
            order:ids, optOrder:buildOptOrder(ids), answers:{}, index:0, score:0,
+           maxScore:maxScore, norm:norm,
            peeked:[], peekCount:0, peekPenalty:0,
            startedAt:now,
            deadline: unlimited ? now + 1000*60*60*24*365 : now + durationMin*60000,
@@ -85,7 +200,28 @@ function newState(name){
            fired:[], finished:false, finishedAt:null, forced:false };
 }
 function save(){ try{ localStorage.setItem(LS_PROGRESS, JSON.stringify(state)); }catch(e){} }
-function load(){ try{ const s=JSON.parse(localStorage.getItem(LS_PROGRESS)); return (s && s.order) ? s : null; }catch(e){ return null; } }
+function load(){
+  try{
+    const s = JSON.parse(localStorage.getItem(LS_PROGRESS));
+    if (!s || !s.order) return null;
+    /* 旧存档迁移：此前版本 state.score 存的是原始分值（非 150 分制），
+     * 且没有 alloc/rawMax。这里按当时存档里的 maxScore 反推一个近似
+     * 比例，让旧进度能继续答题而不崩；精度不如新抽卷，但足够过渡。 */
+    if (!s.alloc && s.maxScore && s.maxScore > 0 && FULL !== s.maxScore){
+      const ratio = FULL / s.maxScore;
+      s.score = Math.round((Number(s.score) || 0) * ratio);
+      Object.keys(s.answers || {}).forEach(k=>{
+        const a = s.answers[k];
+        if (a && a.delta !== undefined){
+          a.rawDelta = Number(a.rawDelta) || a.delta;
+          a.delta = Math.round((Number(a.rawDelta) || a.delta) * ratio);
+        }
+      });
+      if (s.peekPenalty) s.peekPenalty = Math.round((Number(s.peekPenalty) || 0) * ratio);
+    }
+    return s;
+  }catch(e){ return null; }
+}
 
 /* 选项显示顺序：每位老师各自随机，一旦生成就固定下来（保证续答、回顾一致） */
 function buildOptOrder(ids){
@@ -124,7 +260,7 @@ function show(name){
 let lastScore = null;
 function updateScoreBar(animate){
   if (!state) return;
-  $("#scoreNum").textContent = signed(state.score);
+  $("#scoreNum").textContent = slash(state.score);   // 150 分制：得分 / 150
   $("#scoreBar").classList.toggle("minus", state.score < 0);
   if (animate && lastScore !== null && state.score !== lastScore){
     $("#scoreBar").classList.add("bump");
@@ -283,7 +419,9 @@ function renderAt(idx, readonly){
     : (q.contentTag ? '<span class="tag">'+esc(q.contentTag)+'</span>' : '')
     + (q.type ? '<span class="tag">'+esc(q.type)+'</span>' : '');
 
-  $("#progText").textContent = fill(TEXTS.progressText, {n:idx+1, total:state.order.length, score:signed(state.score)});
+  const pct = scorePercent(state.score);
+  $("#progText").textContent = fill(TEXTS.progressText,
+      {n:idx+1, total:state.order.length, score:slash(state.score), pct:pct});
   $("#progBar").style.width  = (idx / state.order.length * 100) + "%";
 
   // 题号导航
@@ -321,8 +459,9 @@ function renderAt(idx, readonly){
   // 回看：还原当时的作答状态
   if (readonly && a){
     const chosen = a.sel || [];
+    const optScore = (state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
     box.querySelectorAll(".opt").forEach(el=>{
-      const i = Number(el.dataset.i), sc = Number(q.options[i].score)||0;
+      const i = Number(el.dataset.i), sc = Number(optScore[i]) || 0;
       el.classList.add("locked");
       if (chosen.includes(i)){
         el.classList.toggle("sel", true);
@@ -395,14 +534,18 @@ function doSubmit(){
   const sel = [...document.querySelectorAll("#options .opt.sel")].map(el => Number(el.dataset.i));
   locked = true;   // 不选也可以提交，sel 可能为空
 
-  const delta = sel.reduce((s,i)=> s + (Number(q.options[i].score)||0), 0);
+  // 该题得分 = 所选各选项的 150 分制分值之和（抽题时已分配好，直接查表累加）
+  const optScore = (state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
+  let delta = 0;
+  sel.forEach(i=>{ delta += (Number(optScore[i]) || 0); });
   state.answers[qid] = { sel, delta, qtext:q.text, ts:Date.now() };
   state.score += delta;
+  if (state.score > FULL) state.score = FULL;     // 累加兜底（理论上不触发）
   save();
   updateScoreBar(true);
 
   document.querySelectorAll("#options .opt").forEach(el=>{
-    const i = Number(el.dataset.i), chosen = sel.includes(i), sc = Number(q.options[i].score)||0;
+    const i = Number(el.dataset.i), chosen = sel.includes(i), sc = Number(optScore[i]) || 0;
     el.classList.add("locked");
     if (chosen){
       el.classList.add(sc > 0 ? "right" : "wrong");
@@ -420,10 +563,11 @@ function doSubmit(){
 
 function buildFeedback(q, sel, delta){
   const qid = String(q.id);
+  const optScore = (state.norm && state.norm.optScore && state.norm.optScore[qid]) || [];
   const lines = sel.length
     ? sel.map(i=>{
-        const op = q.options[i], sc = Number(op.score)||0;
-        const color = sc>0 ? "var(--ok)" : sc<0 ? "var(--bad)" : "var(--sub)";
+        const op = q.options[i], raw = Number(op.score)||0, sc = Number(optScore[i]) || 0;
+        const color = raw>0 ? "var(--ok)" : raw<0 ? "var(--bad)" : "var(--sub)";
         return '<p class="fb-line"><b>'+ letterOf(qid, i) +'. '+ esc(op.text) +'</b>　'
           + '<span style="color:'+color+';font-weight:700">'+ signed(sc) +' 分</span><br>' + esc(op.feedback||"") + '</p>';
       }).join("")
@@ -433,9 +577,11 @@ function buildFeedback(q, sel, delta){
   const reveal = (q.secretTag && String(q.secretTag).trim())
     ? '<div class="fb-real">'+ esc(TEXTS.secretReveal) +'<span>'+ esc(realTag) +'</span>'+ esc(TEXTS.secretSuffix) +'</div>' : "";
 
+  const pct = scorePercent(state.score);
   return '<div class="feedback">'
     + '<div class="fb-head"><span class="fb-delta '+(delta>0?"up":delta<0?"down":"")+'">'+ signed(delta) +' 分</span>'
-    + '<span class="fb-total">累计 '+ signed(state.score) +' 分</span></div>'
+    + '<span class="fb-total">累计 '+ slash(state.score)
+    + '　<span style="color:var(--primary);font-weight:700">'+ pct +'%</span></span></div>'
     + lines
     + (q.comment ? '<div class="fb-comment">'+ esc(TEXTS.commentMark) + esc(q.comment) +'</div>' : "")
     + reveal + '</div>';
@@ -454,6 +600,8 @@ function finish(forced){
   pushHistory({
     name: state.name, score: state.score,
     n: Object.keys(state.answers).length, total: state.order.length,
+    max: FULL,
+    pct: scorePercent(state.score),
     time: state.finishedAt - state.startedAt, ts: state.finishedAt
   });
   renderResult(); show("result");
@@ -461,21 +609,23 @@ function finish(forced){
 function renderResult(){
   const answered = Object.keys(state.answers).length;
   const used = state.finishedAt - state.startedAt;
+  const pct = scorePercent(state.score);
 
   $("#forceTip").innerHTML = state.forced ? '<div class="warnbox">'+ esc(TEXTS.forceTip) +'</div>' : "";
   $("#resultTitle").textContent = TEXTS.resultTitle;
   $("#resultSub").textContent   = fill(TEXTS.resultWho, {name: state.name || "匿名"});
 
   const sb = $("#scoreBig");
-  sb.textContent = signed(state.score);
+  sb.textContent = slash(state.score);          // 150 分制：得分 / 150
   sb.className = "score-big " + (state.score>0?"up":state.score<0?"down":"");
-  $("#rankText").textContent = rankOf(state.score);
+  $("#rankText").textContent = rankOf(state.score) + "（满分 " + FULL + " 分）";
   $("#statRow").innerHTML =
       '<div>'+esc(TEXTS.labelCount)+'<b>'+answered+' / '+state.order.length+'</b></div>'
     + '<div>'+esc(TEXTS.labelTime)+'<b>'+fmt(used)+'</b></div>'
+    + '<div>'+esc(TEXTS.labelPercent)+'<b>'+pct+' / '+FULL+'</b></div>'
     + '<div>'+esc(TEXTS.labelFinish)+'<b>'+stamp(state.finishedAt)+'</b></div>';
 
-  $("#copyBox").value = buildText(used, answered);
+  $("#copyBox").value = buildText(used, answered, pct);
 
   // 偷看扣分记录（只在瞄过时才显示）
   const peekBox = $("#peekStat");
@@ -494,11 +644,14 @@ function renderResult(){
 function renderHistory(){
   const h = getHistory();
   if (!h.length) return '<div class="hist-head">'+esc(TEXTS.adminRecords)+'</div><div class="hist-item">'+esc(TEXTS.adminNoRecord)+'</div>';
-  return '<div class="hist-head">'+esc(TEXTS.adminRecords)+'</div>' + h.map(r=>
-    '<div class="hist-item"><span class="hs">'+ signed(r.score) +'</span>'
-    + '<span>'+ esc(r.name||"匿名") +' · '+ r.n +'/'+ r.total +' 题 · '+ fmt(r.time) +'</span>'
-    + '<span style="margin-left:auto;color:var(--sub)">'+ stamp(r.ts) +'</span></div>'
-  ).join("");
+  return '<div class="hist-head">'+esc(TEXTS.adminRecords)+'</div>' + h.map(r=>{
+    const mx = r.max || 0, pc = r.pct != null ? r.pct : (mx>0 ? Math.round(r.score/mx*100) : 0);
+    const slashStr = mx>0 ? signed(r.score)+' / '+mx : signed(r.score);
+    return '<div class="hist-item"><span class="hs">'+ slashStr +'</span>'
+      + '<span>'+ esc(r.name||"匿名") +' · '+ r.n +'/'+ r.total +' 题 · '+ pc +'%'
+      + ' · '+ fmt(r.time) +'</span>'
+      + '<span style="margin-left:auto;color:var(--sub)">'+ stamp(r.ts) +'</span></div>';
+  }).join("");
 }
 $("#btnReview").onclick = ()=>{
   const box = $("#reviewBox");
@@ -518,13 +671,13 @@ $("#btnRedo").onclick = ()=>{
   try{ state = newState(state.name); }catch(e){ return; }
   save(); startTimer(); renderQuestion(); show("quiz");
 };
-function buildText(used, answered){
+function buildText(used, answered, pct){
   return [
     fill(TEXTS.textLine1,  {title:CONFIG.title}),
     fill(TEXTS.textSchool, {school:CONFIG.schoolName}),
     fill(TEXTS.textName,   {name: state.name || "匿名"}),
-    fill(TEXTS.textScore,  {score:signed(state.score)}),
-    fill(TEXTS.textRank,   {rank:rankOf(state.score)}),
+    fill(TEXTS.textScore,  {score: pct + " / " + FULL + " 分"}),
+    fill(TEXTS.textRank,   {rank: rankOf(state.score)}),
     fill(TEXTS.textCount,  {n:answered, total:state.order.length}),
     fill(TEXTS.textTime,   {time:fmt(used)}),
     fill(TEXTS.textStamp,  {stamp:stamp(state.finishedAt)}),
@@ -561,7 +714,7 @@ $("#btnCsv").onclick = ()=>{
     rows.push([
       who, n+1, q.text, q.contentTag||"", q.type||"",
       a.sel.map(i=>letterOf(id, i)+"."+q.options[i].text).join(" / "),
-      a.sel.map(i=>Number(q.options[i].score)||0).join(" / "),
+      a.sel.map(i=>(Number(state.norm.optScore[id][i])||0)).join(" / "),
       a.delta,
       a.sel.map(i=>q.options[i].feedback||"").join(" / ")
     ]);
@@ -609,121 +762,101 @@ function makeCard(){
   const nm = state.name || "匿名";
   c.fillStyle=v.sub;  c.font="500 26px "+F; c.fillText(nm + " 老师", C, 355);
 
-  const sc=state.score;
+  const sc=state.score, pc=scorePercent(sc);
   c.fillStyle = sc>0 ? v.primary : (sc<0 ? v.bad : v.ink);
-  c.font="800 140px "+F; c.fillText(signed(sc), C, 505);
-  c.fillStyle=v.sub; c.font="500 24px "+F; c.fillText(TEXTS.labelScore, C, 550);
+  c.font="800 140px "+F; c.fillText(slash(sc), C, 505);
+  c.fillStyle=v.sub; c.font="500 24px "+F; c.fillText(TEXTS.labelScore + "　（满分 " + FULL + " 分）", C, 550);
 
   c.fillStyle=v.primary; c.font="700 34px "+F; c.fillText(rankOf(sc), C, 630);
 
   const used=state.finishedAt-state.startedAt, ans=Object.keys(state.answers).length;
   c.fillStyle=v.ink; c.font="700 28px "+F;
-  c.fillText(ans+" / "+state.order.length+" 题", C-230, 745);
-  c.fillText(fmt(used), C, 745);
-  c.fillText(stamp(state.finishedAt).slice(5), C+230, 745);
+
+  c.fillText(ans+" / "+state.order.length+" 题", C-200, 720);
+  c.fillText(fmt(used),                    C+0,   720);
+  c.fillText(pc+" / "+FULL,                C+200, 720);
+  c.fillStyle=v.sub; c.font="500 18px "+F;
+  c.fillText(TEXTS.labelCount,   C-200, 758);
+  c.fillText(TEXTS.labelTime,    C+0,   758);
+  c.fillText(TEXTS.labelPercent, C+200, 758);
+
+  c.fillStyle="rgba(255,255,255,.85)"; c.fillRect(120, 810, 660, 1);
   c.fillStyle=v.sub; c.font="500 20px "+F;
-  c.fillText(TEXTS.labelCount, C-230, 780);
-  c.fillText(TEXTS.labelTime,  C, 780);
-  c.fillText(TEXTS.labelFinish,C+230, 780);
+  c.fillText(TEXTS.pngNote1, C, 860);
+  c.fillText(TEXTS.pngNote2, C, 895);
 
-  c.strokeStyle=v.primary; c.globalAlpha=.35; c.lineWidth=2;
-  c.beginPath(); c.moveTo(200,705); c.lineTo(700,705); c.stroke(); c.globalAlpha=1;
+  c.fillStyle=v.primary; c.font="700 22px "+F;
+  c.fillText(TEXTS.pngShield, C, 960);
 
-  c.fillStyle=v.sub; c.font="500 22px "+F;
-  c.fillText(TEXTS.pngNote1, C, 875);
-  c.fillText(TEXTS.pngNote2, C, 915);
-  c.font="500 20px "+F; c.globalAlpha=.7;
-  c.fillText(TEXTS.pngShield, C, 1010); c.globalAlpha=1;
+  c.fillStyle=v.sub; c.font="500 16px "+F;
+  c.fillText(stamp(state.finishedAt), C, 1015);
 
   return cv.toDataURL("image/png");
 }
 
 /* ==================== 偷看本题答案 ==================== */
 $("#btnPeekQ").onclick = ()=>{
+  if (viewing !== null) return;
   const q = byId(state.order[state.index]);
   if (!q) return;
-  const qid = String(q.id);
-
-  // 非管理员：不给答案，且扣分递增（第1次 -1，第2次 -2，第3次 -3……）
-  let cost = 0;
-  if (!isAdmin){
-    state.peekCount = (state.peekCount || 0) + 1;
-    cost = state.peekCount;                       // 第 n 次点，扣 n 分
-    state.peekPenalty = (state.peekPenalty || 0) + cost;
-    state.peeked = state.peeked || [];
-    if (!state.peeked.includes(qid)) state.peeked.push(qid);
-    state.score -= cost;
-    save();
-    updateScoreBar(true);
+  if (isAdmin){
+    const body = $("#peekQBody");
+    body.innerHTML = q.options.map((o,j)=>{
+      const sc = Number(o.score)||0, cls = sc>0?"up":sc<0?"down":"zero";
+      return '<div class="peek-opt"><span class="k">'+String.fromCharCode(65+j)+'.</span>'
+        + '<span><span class="s '+cls+'">'+signed(sc)+'</span> '+esc(o.text)
+        + (o.feedback?'<br><span class="f">→ '+esc(o.feedback)+'</span>':'')+'</span></div>';
+    }).join("");
+    $("#peekQTitle").textContent = TEXTS.peekAdminTitle;
+    $("#peekQTip").textContent   = TEXTS.peekAdminTip;
+    $("#peekQModal").classList.remove("hide");
+    return;
   }
-
-  $("#peekQTitle").textContent = isAdmin ? TEXTS.peekAdminTitle : fill(TEXTS.peekDeny, {n: cost});
-  $("#peekQTip").textContent = isAdmin
-    ? TEXTS.peekAdminTip
-    : fill(TEXTS.peekPenalty, {n: cost, c: state.peekCount, t: state.peekPenalty});
-
-  // 非管理员：只显示题干，不显示任何选项分值 / 反馈 / 评价
-  const perm = (state.optOrder && state.optOrder[qid]) || [...Array((q.options||[]).length).keys()];
-  const optHtml = isAdmin
-    ? perm.map((oi,j)=>{
-        const o = q.options[oi], sc = Number(o.score)||0;
-        return '<div class="peek-opt"><span class="k">'+ String.fromCharCode(65+j) +'.</span>'
-          + '<span><span class="s '+(sc>0?"up":sc<0?"down":"zero")+'">'+ signed(sc) +'</span> '+ esc(o.text)
-          + (o.feedback ? '<br><span class="f">→ '+ esc(o.feedback) +'</span>' : '') + '</span></div>';
-      }).join("")
-    : perm.map((oi,j)=>
-        '<div class="peek-opt"><span class="k">'+ String.fromCharCode(65+j) +'.</span>'
-      + '<span>'+ esc(q.options[oi].text) +'</span></div>'
-      ).join("")
-      + '<p class="peek-cmt">'+ esc(TEXTS.peekNoAnswer) +'</p>'
-      + '<p class="peek-cmt">'+ esc(TEXTS.peekNoAnswer2) +'</p>';
-
-  $("#peekQBody").innerHTML =
-      '<div class="peek-item"><p class="peek-q">'+ esc(q.text) +'</p>'
-    + '<div class="peek-meta">'+ esc((q.contentTag||"")+(q.contentTag&&q.type?" · ":"")+(q.type||"")) +'</div>'
-    + optHtml
-    + (isAdmin && q.comment ? '<div class="peek-cmt">💬 '+ esc(q.comment) +'</div>' : '')
-    + '</div>';
-
-  $("#peekQModal").classList.remove("hide");
+  state.peekCount++;
+  const cost = peekCost(q.id, state.peekCount);
+  state.peekPenalty += cost;
+  state.score = Math.max(0, state.score - cost);
+  save(); updateScoreBar(true);
+  toast(fill(TEXTS.peekDeny, {n:cost}));
 };
 $("#btnPeekQClose").onclick = ()=> $("#peekQModal").classList.add("hide");
 $("#peekQModal").onclick = e => { if (e.target.id === "peekQModal") $("#peekQModal").classList.add("hide"); };
 
-/* ==================== 图片放大 ==================== */
-$("#qImage").onclick = ()=>{
-  const lb=document.createElement("div"); lb.id="lightbox";
-  const im=document.createElement("img"); im.src=$("#qImage").src;
-  lb.appendChild(im); lb.onclick=()=>lb.remove(); document.body.appendChild(lb);
-};
-
 /* ==================== 启动 ==================== */
-(function boot(){
-  BANK.forEach((q,i)=>{ if (q.id==null) q.id = i+1; });
+function boot(){
   injectThemeCss();
-  try{ setTheme(localStorage.getItem(LS_THEME) || Object.keys(THEMES)[0]); }catch(e){ setTheme(Object.keys(THEMES)[0]); }
   buildThemeMenu();
+  try{ const t = localStorage.getItem(LS_THEME); if (t && THEMES[t]) curTheme = t; }catch(e){}
+  setTheme(curTheme);
   initStart();
-
   const saved = load();
-  if (saved && !saved.optOrder) saved.optOrder = buildOptOrder(saved.order);  // 兼容旧存档
-  if (saved && !saved.peeked)   saved.peeked = [];
-  if (saved && saved.peekCount == null) saved.peekCount = saved.peeked.length;  // 兼容旧存档
-  if (saved && saved.peekPenalty == null){
-    const n = saved.peekCount || 0;
-    saved.peekPenalty = n*(n+1)/2;   // 1+2+...+n
-  }
   if (saved && !saved.finished){
     state = saved;
-    isAdmin = !!state.admin;
+    isAdmin = state.admin === true;
+    if (!state.norm && state.maxScore && state.maxScore > 0 && FULL !== state.maxScore){
+      const ratio = FULL / state.maxScore;
+      state.score = Math.round((Number(state.score)||0) * ratio);
+      state.peekPenalty = Math.round((Number(state.peekPenalty)||0) * ratio);
+      Object.keys(state.answers||{}).forEach(k=>{
+        const a = state.answers[k];
+        if (a && a.delta !== undefined){ a.rawDelta = a.delta; a.delta = Math.round((Number(a.rawDelta)||0) * ratio); }
+      });
+      state.maxScore = FULL;
+    } else if (!state.norm){
+      state.norm = buildNorm(state.order);
+    }
     durationMin = state.duration || CONFIG.durationMinutes;
-    unlimited = !!state.unlimited;
-    startTimer(); updateScoreBar(false); renderQuestion(); show("quiz"); toast(TEXTS.toastResume);
-  } else if (saved && saved.finished){
-    state = saved;
-    isAdmin = !!state.admin;
-    durationMin = state.duration || CONFIG.durationMinutes;
-    unlimited = !!state.unlimited;
-    renderResult(); show("result");
+    unlimited  = !!state.unlimited;
+    lastScore = state.score;
+    updateScoreBar(false);
+    startTimer();
+    renderQuestion();
+    show("quiz");
+    toast(TEXTS.toastResume);
   }
-})();
+}
+if (document.readyState === "loading"){
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}

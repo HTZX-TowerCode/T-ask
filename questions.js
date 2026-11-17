@@ -15,8 +15,8 @@ window.QUIZ_CONFIG = {
   subtitle:   "教师专场 · 答完不许真实学生",   // 副标题，随便皮一下
 
   totalQuestions:  30,        // 每位老师抽到的题数（固定 30 道）
-  durationMinutes: 15,        // 默认总时长（分钟），管理员可在开局页临时改
-  checkpoints:     [10, 5, 1],// 剩余多少分钟时弹提醒
+  durationMinutes: 8,        // 默认总时长（分钟），管理员可在开局页临时改
+  checkpoints:     [6, 3, 1],// 剩余多少分钟时弹提醒
 
   shuffleOptions: true,       // 每个选项顺序随机打乱（不让 A 总是最高分）
                               // 想按题库原本顺序显示就改成 false
@@ -420,7 +420,7 @@ window.QUESTION_BANK = [
       { text: "RGB(102, 8, 116)", score: -1, feedback: "差一点点，但这是清华紫。肉眼几乎分不出来，可不是我们的。" },
       { text: "RGB(148, 7, 10)", score: -2, feedback: "这是北大红。老师，我们是红塔，不是博雅塔。" },
       { text: "RGB(112, 15, 150)", score: 5, feedback: "正是。深沉又有精神的紫红，主题里叫“紫气东来”。" },
-      { text: "#700F96", score: 4, feedback: "写法不同，其实是同一个颜色的十六进制表达。换算过来正是 RGB(112,15,150)，给四分。" },
+      { text: "#700F97", score: 2, feedback: "写法不同，其实是颜色的十六进制表达。换算过来是 RGB(112,15,151)，最后一个数字离答案多了一个，给两分。" },
       { text: "RGB(0, 176, 240)", score: -1, feedback: "这是一支很精神的蓝，可惜颜色都跑偏了。" }
     ],
     comment: "换主题时右上角点“主题”，最后一套“紫气东来”就是这个颜色。"
